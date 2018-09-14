@@ -125,10 +125,10 @@ void *detect_in_thread(void *ptr)
 
     if (nms > 0) do_nms_obj(dets, nboxes, l.classes, nms);
 
-    printf("\033[2J");
-    printf("\033[1;1H");
-    printf("\nFPS:%.1f\n",fps);
-    printf("Objects:\n\n");
+    //printf("\033[2J");
+    //printf("\033[1;1H");
+    //printf("\nFPS:%.1f\n",fps);
+    //printf("Objects:\n\n");
     image display = buff[(buff_index+2) % 3];
     draw_detections(display, dets, nboxes, demo_thresh, demo_names, demo_alphabet, demo_classes);
     free_detections(dets, nboxes);
@@ -258,6 +258,7 @@ void demo(char *cfgfile, char *weightfile, float thresh, int cam_index, const ch
         }else{
             char name[256];
             sprintf(name, "%s_%08d", prefix, count);
+            printf("\n%s_%08d\n", prefix, count);
             save_image(buff[(buff_index + 1)%3], name);
         }
         pthread_join(fetch_thread, 0);
