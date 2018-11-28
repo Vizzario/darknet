@@ -1,4 +1,6 @@
 #include "darknet.h"
+#include <stdbool.h>
+//#include "region_layer.h"
 
 static int coco_ids[] = {1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,31,32,33,34,35,36,37,38,39,40,41,42,43,44,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,67,70,72,73,74,75,76,77,78,79,80,81,82,84,85,86,87,88,89,90};
 
@@ -55,6 +57,23 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
     //args.type = INSTANCE_DATA;
     args.threads = 64;
 
+    // Create the log file
+    FILE *logFile;
+    char *logPath = (char *) malloc(strlen(backup_directory)+ 30);
+    memset(logPath, '\0', strlen(backup_directory) + 20);
+
+    strcpy(logPath, backup_directory);
+    strcat(logPath, "/training.log" );
+    printf("%s", logPath);
+
+    //if( access(logPath, F_OK ) != -1 ) {
+    //    remove(logPath);
+    //} 
+
+    logFile = fopen(logPath, "a+"); // a+ (create + append) option will allow appending which is useful in a log file
+
+    free(logPath);
+    
     pthread_t load_thread = load_data(args);
     double time;
     int count = 0;
@@ -127,7 +146,11 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
 
         i = get_current_batch(net);
         printf("%ld: %f, %f avg, %f rate, %lf seconds, %d images\n", get_current_batch(net), loss, avg_loss, get_current_rate(net), what_time_is_it_now()-time, i*imgs);
-        if(i%100==0){
+        // write to the log file
+        fprintf(logFile, "Iter: %d, Current Loss: %f, Average Loss: %f \n", i, loss, avg_loss);
+        fflush(logFile);
+
+	if(i%100==0){
 #ifdef GPU
             if(ngpus != 1) sync_nets(nets, ngpus, 0);
 #endif
@@ -486,31 +509,74 @@ void validate_detector(char *datacfg, char *cfgfile, char *weightfile, char *out
     fprintf(stderr, "Total Detection Time: %f Seconds\n", what_time_is_it_now() - start);
 }
 
-void validate_detector_recall(char *cfgfile, char *weightfile)
+bool isvalueinarray(int val, int *arr, int size){
+    int i;
+    for (i=0; i < size; i++) {
+        if (arr[i] == val)
+            return true;
+    }
+    return false;
+}
+
+void validate_detector_recall(char *datacfg, char *cfgfile, char *weightfile)
 {
     network *net = load_network(cfgfile, weightfile, 0);
     set_batch_network(net, 1);
     fprintf(stderr, "Learning Rate: %g, Momentum: %g, Decay: %g\n", net->learning_rate, net->momentum, net->decay);
     srand(time(0));
 
-    list *plist = get_paths("data/coco_val_5k.list");
+    list *options = read_data_cfg(datacfg);
+    char *valid_images = option_find_str(options, "valid", "data/train.list");
+    //list *plist = get_paths("data/coco_val_5k.list");
+    //list *plist = get_paths("data/train.list");
+    //list *plist = get_paths("data/imagenet.labels.list"); 
+    list *plist = get_paths(valid_images);
     char **paths = (char **)list_to_array(plist);
 
+    char *name_list = option_find_str(options, "names", "data/names.list");
+    char **names = get_labels(name_list);
+    
     layer l = net->layers[net->n-1];
+    int classes = l.classes;
+    printf("classes: %d\n", classes);
 
     int j, k;
-
+    
     int m = plist->size;
     int i=0;
 
     float thresh = .001;
     float iou_thresh = .5;
+    //float iou_thresh = .2;
     float nms = .4;
 
     int total = 0;
     int correct = 0;
     int proposals = 0;
     float avg_iou = 0;
+    //added
+    float precision = 0;
+    float recall = 0;
+    float f1_score = 0;
+
+    int correct_all_classes[classes];
+    int proposals_all_classes[classes];
+    int total_all_classes[classes];
+
+    float precision_all_classes[classes];
+    float recall_all_classes[classes];
+    float iou_all_classes[classes];
+    float f1_all_classes[classes];
+
+    memset(correct_all_classes, 0, classes*sizeof(int));
+    memset(proposals_all_classes, 0, classes*sizeof(int));
+    memset(total_all_classes, 0, classes*sizeof(int));
+    memset(precision_all_classes, 0, classes*sizeof(float));
+    memset(recall_all_classes, 0, classes*sizeof(float));
+    memset(iou_all_classes, 0, classes*sizeof(float));
+    memset(f1_all_classes, 0, classes*sizeof(float));
+    //
+
 
     for(i = 0; i < m; ++i){
         char *path = paths[i];
@@ -518,23 +584,86 @@ void validate_detector_recall(char *cfgfile, char *weightfile)
         image sized = resize_image(orig, net->w, net->h);
         char *id = basecfg(path);
         network_predict(net, sized.data);
+        //get_region_boxes(l, 1, 1, thresh, probs, boxes, 0, 0, .5);
         int nboxes = 0;
         detection *dets = get_network_boxes(net, sized.w, sized.h, thresh, .5, 0, 1, &nboxes);
         if (nms) do_nms_obj(dets, nboxes, 1, nms);
-
+        for(j = 0; j < classes; ++j){
+            printf("score:%f\n", dets[i].prob[j]);
+        }
         char labelpath[4096];
         find_replace(path, "images", "labels", labelpath);
         find_replace(labelpath, "JPEGImages", "labels", labelpath);
         find_replace(labelpath, ".jpg", ".txt", labelpath);
         find_replace(labelpath, ".JPEG", ".txt", labelpath);
-
+        //added
+        find_replace(labelpath, ".png", ".txt", labelpath);
+        find_replace(labelpath, ".PNG", ".txt", labelpath);
+        
         int num_labels = 0;
         box_label *truth = read_boxes(labelpath, &num_labels);
+        int seen_truth[num_labels];
+        int count = 0;
+
+
         for(k = 0; k < nboxes; ++k){
             if(dets[k].objectness > thresh){
+                //printf("%d\n", dets[i].prob[k]);
+                //int pred_id = max_index(dets[i].prob[k], classes);
+                //float prob = dets[i].prob[k][pred_id];
                 ++proposals;
             }
         }
+        printf("Loop for k<lwlhl \n");
+/*
+        for(k = 0; k < l.w*l.h*l.n; ++k){
+            printf("Loop: %d \n", k);
+            int pred_id = max_index(probs[k], classes);
+            printf("pred_id: %d\n", pred_id);
+            float prob = probs[k][pred_id];
+            printf("prob: %f\n", prob);
+            if(prob > thresh){
+                proposals_all_classes[pred_id] += 1;
+                ++proposals;
+                float best_iou = 0;
+                int true_id = -1;
+                for (j = 0; j < num_labels && count<num_labels; ++j) {
+                    if (isvalueinarray(j, seen_truth, count+1) == false){
+                       //  printf("%d", j);
+                        box t = {truth[j].x, truth[j].y, truth[j].w, truth[j].h};
+                        float iou = box_iou(boxes[k], t);
+                        if (iou > best_iou){
+                            best_iou = iou;
+                            true_id = truth[j].id;
+                            seen_truth[count] = j;
+                            //printf("j is %d\n", j);
+                        }
+                    }
+                }
+            if(0) {
+                if(pred_id == 0) {
+                    pred_id++;
+                    printf("i have changed %d", pred_id);
+                }else {
+                    pred_id--; 
+                    printf("i have changed %d", pred_id);
+                }
+                printf(" changes predid %d, true_id %d\n", pred_id, true_id);
+                }
+            if (pred_id == true_id && best_iou > iou_thresh) {
+                    correct++;
+                    correct_all_classes[pred_id] += 1;
+                    iou_all_classes[pred_id] += best_iou;
+                    avg_iou += best_iou;
+                    // printf("seen truth is: %d\n", seen_truth[count]);
+                    count++;
+                }
+
+            }
+
+        }
+*/
+        
         for (j = 0; j < num_labels; ++j) {
             ++total;
             box t = {truth[j].x, truth[j].y, truth[j].w, truth[j].h};
@@ -551,7 +680,43 @@ void validate_detector_recall(char *cfgfile, char *weightfile)
             }
         }
 
+        for (j = 0; j < classes; ++j) {
+            precision_all_classes[j] = 100. * correct_all_classes[j] / (float)proposals_all_classes[j];
+            recall_all_classes[j] = 100. * correct_all_classes[j] / (float)total_all_classes[j];
+            f1_all_classes[j] = 2 * (precision_all_classes[j] *  recall_all_classes[j]) / (precision_all_classes[j] +  recall_all_classes[j]);
+
+            printf("iou_all_classes[j]: %.2f\n", iou_all_classes[j]);
+            printf("correct_all_classes[j]: %d\n", correct_all_classes[j]);
+            printf("correct_all_classes[j]*100: %d\n", correct_all_classes[j]*100);
+            printf("Class:  %-8s\t IOU: %.2f%%\t  Precision: %.2f%%\t Recall: %.2f%%\t f1_score:  %.2f%%\n", names[j], iou_all_classes[j]/correct_all_classes[j]*100,  precision_all_classes[j], recall_all_classes[j],  f1_all_classes[j]);
+            // printf("true ids: %d\n", truth[j].id);
+        }
+
+/*
+        for (j=0; j<classes; ++j){
+	++total;
+        box t = {truth[j].x, truth[j].y, truth[j].w, truth[j].h};
+	float best_iou = 0;
+            for(k = 0; k < l.w*l.h*l.n; ++k){
+                float iou = box_iou(dets[k].bbox, t);
+                if(dets[k].objectness > thresh && iou > best_iou){
+                    best_iou = iou;
+                }
+            }
+            avg_iou += best_iou;
+            if(best_iou > iou_thresh){
+                ++correct;
+            }
         fprintf(stderr, "%5d %5d %5d\tRPs/Img: %.2f\tIOU: %.2f%%\tRecall:%.2f%%\n", i, correct, total, (float)proposals/(i+1), avg_iou*100/total, 100.*correct/total);
+	}
+*/
+        // printf("Correct %d\n", correct);
+        // printf("Total %d\n", total);
+        // printf("Proposals %d\n", proposals);
+        precision = 100.*correct/(float)proposals;
+        recall = 100.*correct/total;
+        f1_score = (2 * precision * recall) / (precision + recall);
+        fprintf(stderr, "%5d %5d %5d\tRPs/Img: %.2f\tIOU: %.2f%%\tPrecision: %.2f%%\tf1_score: %.2f%%Recall:%.2f%%\n", i, correct, total, (float)proposals/(i+1), avg_iou*100/correct,precision,recall,f1_score );
         free(id);
         free_image(orig);
         free_image(sized);
@@ -789,7 +954,7 @@ void network_detect(network *net, image im, float thresh, float hier_thresh, flo
 void run_detector(int argc, char **argv)
 {
     char *prefix = find_char_arg(argc, argv, "-prefix", 0);
-    float thresh = find_float_arg(argc, argv, "-thresh", .5);
+    float thresh = find_float_arg(argc, argv, "-thresh", .24);
     float hier_thresh = find_float_arg(argc, argv, "-hier", .5);
     int cam_index = find_int_arg(argc, argv, "-c", 0);
     int frame_skip = find_int_arg(argc, argv, "-s", 0);
@@ -837,7 +1002,7 @@ void run_detector(int argc, char **argv)
     else if(0==strcmp(argv[2], "train")) train_detector(datacfg, cfg, weights, gpus, ngpus, clear);
     else if(0==strcmp(argv[2], "valid")) validate_detector(datacfg, cfg, weights, outfile);
     else if(0==strcmp(argv[2], "valid2")) validate_detector_flip(datacfg, cfg, weights, outfile);
-    else if(0==strcmp(argv[2], "recall")) validate_detector_recall(cfg, weights);
+    else if(0==strcmp(argv[2], "recall")) validate_detector_recall(datacfg,cfg, weights);
     else if(0==strcmp(argv[2], "demo")) {
         list *options = read_data_cfg(datacfg);
         int classes = option_find_int(options, "classes", 20);
